@@ -52,4 +52,10 @@ Four live Solari Browser runs are checked in under
 [`proof/live-runs`](proof/live-runs) — three paid, one refunded, all linked in
 one hash chain. They contain no API key or authentication material.
 
+![Four live runs: three paid, one refunded — all four with the same screenshot hash](proof/receipts.png)
+
+The refused run's screenshot is byte-identical to the three that were paid: the
+soft 404 rendered the same page, so all four receipts carry the same evidence
+digest. See [`proof/README.md`](proof/README.md) for the full reading.
+
 Source: [`main.py`](main.py)
