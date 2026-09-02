@@ -19,9 +19,6 @@ from solari_browser import Solari
 from solari_browser.errors import SolariError
 
 
-TASK_URL = "https://example.com/"
-EXPECTED_TITLE = "Example Domain"
-EXPECTED_HEADING = "Example Domain"
 BUYER_ID = "buyer"
 SELLER_ID = "solari-browser-seller"
 BUDGET_CENTS = 100
@@ -38,6 +35,37 @@ def sha256_bytes(value: bytes) -> str:
 
 def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
+
+
+@dataclass(frozen=True)
+class Task:
+    """What the Buyer is paying for, and what 'done' means."""
+
+    name: str
+    url: str
+    expected_title: str
+    expected_heading: str
+
+
+TASKS = {
+    # The page exists and matches the contract: the Evaluator passes.
+    "homepage": Task(
+        name="homepage",
+        url="https://example.com/",
+        expected_title="Example Domain",
+        expected_heading="Example Domain",
+    ),
+    # The page does not exist. example.com serves a soft 404: the request still
+    # renders, the Seller still returns a screenshot and a replay, and nothing
+    # crashes — so a "did the agent finish?" check would pay for this. The
+    # Evaluator reads the delivered page instead, and refuses.
+    "pricing": Task(
+        name="pricing",
+        url="https://example.com/pricing",
+        expected_title="Pricing",
+        expected_heading="Pricing",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -200,17 +228,18 @@ async def download_replay(solari: Solari, session_id: str) -> bytes:
     return b""
 
 
-async def seller_run() -> tuple[dict[str, Any], dict[str, bytes]]:
+async def seller_run(task: Task) -> tuple[dict[str, Any], dict[str, bytes]]:
     solari = Solari(api_key=os.environ["SOLARI_API_KEY"])
     browser = await solari.launch(recording=True)
     session_id = browser.id
     try:
         page = await browser.new_page()
-        await page.goto(TASK_URL)
+        await page.goto(task.url)
+        heading = page.locator("h1")
         observation = {
             "url": page.url,
             "title": await page.title(),
-            "heading": await page.locator("h1").inner_text(),
+            "heading": await heading.inner_text() if await heading.count() else None,
         }
         screenshot = await page.screenshot(full_page=True)
         await asyncio.sleep(2)
@@ -224,11 +253,13 @@ async def seller_run() -> tuple[dict[str, Any], dict[str, bytes]]:
     )
 
 
-def evaluate(observation: dict[str, Any], evidence: dict[str, bytes]) -> Evaluation:
+def evaluate(
+    task: Task, observation: dict[str, Any], evidence: dict[str, bytes]
+) -> Evaluation:
     checks = {
-        "url": observation.get("url") == TASK_URL,
-        "title": observation.get("title") == EXPECTED_TITLE,
-        "heading": observation.get("heading") == EXPECTED_HEADING,
+        "url": observation.get("url") == task.url,
+        "title": observation.get("title") == task.expected_title,
+        "heading": observation.get("heading") == task.expected_heading,
         "screenshot_nonempty": len(evidence["screenshot.png"]) > 1_000,
         "replay_nonempty": len(evidence["replay.ndjson"].splitlines()) > 0,
     }
@@ -239,6 +270,7 @@ def write_receipt(
     run_dir: Path,
     run_id: str,
     created_at: str,
+    task: Task,
     observation: dict[str, Any],
     evidence: dict[str, bytes],
     evaluation: Evaluation,
@@ -253,7 +285,12 @@ def write_receipt(
         "version": 1,
         "run_id": run_id,
         "created_at": created_at,
-        "task": {"url": TASK_URL, "expected_heading": EXPECTED_HEADING},
+        "task": {
+            "name": task.name,
+            "url": task.url,
+            "expected_title": task.expected_title,
+            "expected_heading": task.expected_heading,
+        },
         "seller": observation,
         "evaluator": {"passed": evaluation.passed, "checks": evaluation.checks},
         "verifier": {
@@ -289,14 +326,14 @@ def verify_receipt(receipt_path: Path) -> list[str]:
     return errors
 
 
-async def run(runs_dir: Path) -> int:
+async def run(runs_dir: Path, task: Task) -> int:
     run_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
     ledger = Ledger(runs_dir / "reputation.db")
     try:
         ledger.hold(run_id, created_at)
         try:
-            observation, evidence = await seller_run()
+            observation, evidence = await seller_run(task)
         except Exception as error:
             observation = {
                 "provider": "solari-browser",
@@ -307,12 +344,13 @@ async def run(runs_dir: Path) -> int:
                 "error": type(error).__name__,
             }
             evidence = {"screenshot.png": b"", "replay.ndjson": b""}
-        evaluation = evaluate(observation, evidence)
+        evaluation = evaluate(task, observation, evidence)
         status = ledger.settle(run_id, evaluation.passed)
         receipt_path, receipt = write_receipt(
             runs_dir / run_id,
             run_id,
             created_at,
+            task,
             observation,
             evidence,
             evaluation,
@@ -325,8 +363,12 @@ async def run(runs_dir: Path) -> int:
     if errors:
         print("receipt verification failed:", "; ".join(errors), file=sys.stderr)
         return 1
+    failed = sorted(name for name, ok in evaluation.checks.items() if not ok)
     print(f"receipt: {receipt_path}")
+    print(f"task: {task.name} ({task.url})")
     print(f"decision: {'pass' if evaluation.passed else 'fail'}")
+    if failed:
+        print(f"failed checks: {', '.join(failed)}")
     print(f"budget: {status}")
     print(f"reputation: {receipt['reputation']['score']:.3f}")
     return 0 if evaluation.passed else 2
@@ -336,6 +378,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs-dir", type=Path, default=Path(__file__).parent / "runs")
     parser.add_argument("--verify", type=Path, metavar="RECEIPT")
+    parser.add_argument(
+        "--task",
+        choices=sorted(TASKS),
+        default="homepage",
+        help="which job the Buyer is paying for (default: homepage)",
+    )
     return parser.parse_args()
 
 
@@ -351,7 +399,7 @@ def main() -> int:
     if "SOLARI_API_KEY" not in os.environ:
         print("SOLARI_API_KEY is required for a live run", file=sys.stderr)
         return 1
-    return asyncio.run(run(args.runs_dir))
+    return asyncio.run(run(args.runs_dir, TASKS[args.task]))
 
 
 if __name__ == "__main__":

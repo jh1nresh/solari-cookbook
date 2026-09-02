@@ -67,7 +67,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(
                 main, "seller_run", AsyncMock(side_effect=RuntimeError("secret detail"))
             ):
-                result = await main.run(runs_dir)
+                result = await main.run(runs_dir, main.TASKS["homepage"])
 
             receipt_path = next(runs_dir.glob("*/receipt.json"))
             receipt_text = receipt_path.read_text()
@@ -77,6 +77,39 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receipt["buyer"]["status"], "refunded")
         self.assertEqual(receipt["seller"]["error"], "RuntimeError")
         self.assertNotIn("secret detail", receipt_text)
+
+    async def test_delivered_but_wrong_page_refunds(self) -> None:
+        """The Seller finishes and returns real evidence, but for the wrong page.
+
+        Nothing raised, the screenshot and replay are non-empty, and a
+        completion-based check would release the budget. The Evaluator reads the
+        page against the task contract and refuses.
+        """
+        task = main.TASKS["pricing"]
+        delivered = (
+            {
+                "provider": "solari-browser",
+                "session_id": "session-123",
+                "url": task.url,
+                "title": "Example Domain",
+                "heading": "Example Domain",
+            },
+            {"screenshot.png": b"x" * 2_000, "replay.ndjson": b'{"type":4}\n'},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            runs_dir = Path(directory)
+            with patch.object(main, "seller_run", AsyncMock(return_value=delivered)):
+                result = await main.run(runs_dir, task)
+            receipt = json.loads(next(runs_dir.glob("*/receipt.json")).read_text())
+
+        self.assertEqual(result, 2)
+        self.assertEqual(receipt["buyer"]["status"], "refunded")
+        self.assertEqual(receipt["reputation"]["failed_runs"], 1)
+        # The run produced real evidence; only the page contract failed.
+        self.assertTrue(receipt["evaluator"]["checks"]["screenshot_nonempty"])
+        self.assertTrue(receipt["evaluator"]["checks"]["replay_nonempty"])
+        self.assertFalse(receipt["evaluator"]["checks"]["title"])
+        self.assertFalse(receipt["evaluator"]["checks"]["heading"])
 
 
 if __name__ == "__main__":
