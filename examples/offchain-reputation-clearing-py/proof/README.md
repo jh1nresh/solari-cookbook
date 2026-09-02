@@ -14,6 +14,13 @@ preceding receipt's SHA-256 hash, so the four form one chain.
 The first three ran on September 1, 2026 against `https://example.com/`, before
 the task contract carried a name; their `task` object has no `name` field.
 
+## Proof at a glance
+
+![Four live runs: three paid, one refunded — all four with the same screenshot hash](receipts.png)
+
+Regenerate with `python scripts/render_proof.py` (needs `pillow`); the image is
+rendered from the committed receipts, not drawn by hand.
+
 ## The refunded run
 
 `1d317dc5` is the one worth reading. The Seller was asked for
@@ -45,6 +52,12 @@ recorded run of the wrong page — `Example Domain` where the task asked for
 `Pricing` — so the Evaluator refused and the Buyer's 100 cents went back. The
 Seller's score moved from `1.000` to `0.750`, and the next receipt in the chain
 carries that number.
+
+Because the soft 404 renders the homepage, this run's `screenshot.png` is
+byte-identical to the three that were paid — the same
+`e6b1a4a831845ff3637e62640e7ea985...` digest appears in all four receipts. The
+evidence cannot separate the paid runs from the refused one. Only the task
+contract can.
 
 Each directory contains:
 
