@@ -1,0 +1,44 @@
+name: Isolated repair source verification
+on:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: isolated-repair-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Reject the known incident loader using source as data
+        run: |
+          python3 -I - <<'PY'
+          from pathlib import Path
+          marker = b"global.o='" + b"5-852-" + b"du';"
+          for path in Path('.').rglob('*'):
+              if '.git' in path.parts or path.is_symlink() or not path.is_file():
+                  continue
+              if marker in path.read_bytes():
+                  raise SystemExit('Incident loader marker in ' + str(path))
+          print('Known incident loader scan: clean')
+          PY
+      - name: Parse the five repaired examples without importing or executing them
+        env:
+          IMAGE: node@sha256:9f0dde62d10e7ff7a310ecaebd66225f6b46c17e6cb778449a77b05d3541bea2
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          for example in browser-profiles-ts browser-quickstart-ts browser-stealth-proxy-ts sandbox-port-preview-ts sandbox-quickstart-ts; do
+            source="$GITHUB_WORKSPACE/examples/$example/index.ts"
+            test -f "$source" && test ! -L "$source"
+            docker run --rm --network none --read-only --cap-drop ALL \
+              --security-opt no-new-privileges --pids-limit 64 --memory 256m --cpus 1 \
+              --user 1000:1000 --mount "type=bind,src=$source,dst=/input.ts,readonly" \
+              "$IMAGE" node --experimental-strip-types --check /input.ts
+          done
+          echo 'Five repaired examples parsed; no SDK imports, API calls or paid resources were executed'
